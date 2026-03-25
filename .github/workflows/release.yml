@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify module
+        run: |
+          go mod verify
+          go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check for existing draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DRAFT_TAG=$(gh release list --json tagName,isDraft --jq '.[] | select(.isDraft) | .tagName' | head -n1)
+          echo "tag=$DRAFT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Determine next version
+        id: version
+        run: |
+          DRAFT_TAG="${{ steps.draft.outputs.tag }}"
+          if [ -n "$DRAFT_TAG" ]; then
+            # Reuse the existing draft version.
+            echo "version=$DRAFT_TAG" >> "$GITHUB_OUTPUT"
+            echo "Updating existing draft: $DRAFT_TAG"
+          else
+            # No draft exists — bump patch from latest published tag.
+            LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+            if [ -z "$LATEST" ]; then
+              NEXT="v0.1.0"
+            else
+              MAJOR=$(echo "$LATEST" | cut -d. -f1)
+              MINOR=$(echo "$LATEST" | cut -d. -f2)
+              PATCH=$(echo "$LATEST" | cut -d. -f3)
+              NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            fi
+            echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+            echo "New version: $NEXT"
+          fi
+
+      - name: Generate changelog
+        run: |
+          # Find the latest published (non-draft) tag for the changelog range.
+          LATEST=$(gh release list --json tagName,isDraft --jq '.[] | select(.isDraft | not) | .tagName' | head -n1)
+          if [ -z "$LATEST" ]; then
+            git log --pretty=format:"- %s (%h)" HEAD > /tmp/changelog.txt
+          else
+            git log --pretty=format:"- %s (%h)" "${LATEST}..HEAD" > /tmp/changelog.txt
+          fi
+          echo "Changelog:"
+          cat /tmp/changelog.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create or move tag
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Delete the remote tag if it exists (draft being updated).
+          git tag -d "$VERSION" 2>/dev/null || true
+          git push origin ":refs/tags/$VERSION" 2>/dev/null || true
+          # Create the tag on the current commit.
+          git tag "$VERSION"
+          git push origin "$VERSION"
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DRAFT_TAG="${{ steps.draft.outputs.tag }}"
+          if [ -n "$DRAFT_TAG" ]; then
+            # Update the existing draft release.
+            gh release edit "$VERSION" \
+              --title "$VERSION" \
+              --notes-file /tmp/changelog.txt \
+              --target "${{ github.sha }}"
+          else
+            # Create a new draft release.
+            gh release create "$VERSION" \
+              --title "$VERSION" \
+              --notes-file /tmp/changelog.txt \
+              --draft
+          fi
