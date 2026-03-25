@@ -11,7 +11,7 @@ import (
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"github.com/google/uuid"
-	auth "github.com/tiagoposse/entauth"
+	auth "github.com/tiagoposse/authguard"
 )
 
 // Article is an example entity with owner-based guards.

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	auth "github.com/tiagoposse/entauth"
+	auth "github.com/tiagoposse/authguard"
 	"github.com/yourorg/yourapp/ent"
 	"github.com/yourorg/yourapp/ent/apikey"
 )
@@ -37,7 +37,7 @@ func (s *Server) createApiKey(ctx context.Context, _ *ent.Client, request Create
 		expiry = 90 * 24 * time.Hour // default 90 days
 	}
 
-	// Generate the token via entauth.
+	// Generate the token via authguard.
 	roles := auth.GetRoles(ctx)
 	rawKey, err := s.tokenService.GenerateAPIKey(userID, roles, request.Body.Scopes, expiry)
 	if err != nil {

@@ -1,4 +1,4 @@
-package entauth
+package authguard
 
 // GuardAnnotation is an Ent schema annotation that declares guards on CRUD operations.
 // Guards are strings that name either simple guards (resolved via auth.Resolve) or

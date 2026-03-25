@@ -1,4 +1,4 @@
-package entauth
+package authguard
 
 import (
 	"sync"

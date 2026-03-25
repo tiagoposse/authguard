@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	auth "github.com/tiagoposse/entauth"
+	auth "github.com/tiagoposse/authguard"
 	"github.com/yourorg/yourapp/ent"
 	entuser "github.com/yourorg/yourapp/ent/user"
 )

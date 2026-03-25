@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	auth "github.com/tiagoposse/entauth"
+	auth "github.com/tiagoposse/authguard"
 	"github.com/yourorg/yourapp/ent"
 	"github.com/yourorg/yourapp/ent/session"
 	entuser "github.com/yourorg/yourapp/ent/user"

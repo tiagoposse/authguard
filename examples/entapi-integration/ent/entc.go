@@ -55,7 +55,7 @@ func main() {
 		entapi.WithPackageName("api"),
 		entapi.WithBeforeHandlerHook(entapi.AuthGuardHook(
 			// Import alias used in generated code.
-			`auth "github.com/tiagoposse/entauth"`,
+			`auth "github.com/tiagoposse/authguard"`,
 			// Entity-level guards: these fetch the entity and check a field.
 			map[string]entapi.EntityGuardTemplate{
 				"requiresOwner": {

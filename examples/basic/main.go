@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/tiagoposse/entauth"
+	"github.com/tiagoposse/authguard"
 )
 
 // Fake user store.
@@ -25,11 +25,11 @@ var users = map[string]struct {
 	"bob":   {ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Password: "secret", Roles: []string{"viewer"}},
 }
 
-var tokenService *entauth.TokenService
+var tokenService *authguard.TokenService
 
 func main() {
 	// 1. Create the token service with a 15-minute access token TTL.
-	tokenService = entauth.NewTokenService(
+	tokenService = authguard.NewTokenService(
 		"my-hmac-secret",
 		15*time.Minute,
 		nil, // no role fetcher — we pass roles directly
@@ -99,7 +99,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 // meHandler returns the authenticated user's info.
 func meHandler(w http.ResponseWriter, r *http.Request) {
-	userID, err := entauth.RequireAuth(r.Context())
+	userID, err := authguard.RequireAuth(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -107,8 +107,8 @@ func meHandler(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"user_id": userID,
-		"roles":   entauth.GetRoles(r.Context()),
-		"scopes":  entauth.GetScopes(r.Context()),
+		"roles":   authguard.GetRoles(r.Context()),
+		"scopes":  authguard.GetScopes(r.Context()),
 	})
 }
 

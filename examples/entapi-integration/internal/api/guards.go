@@ -6,7 +6,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
-	auth "github.com/tiagoposse/entauth"
+	auth "github.com/tiagoposse/authguard"
 )
 
 // requiresOwner checks that the authenticated user is the owner of an entity.

@@ -13,19 +13,19 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/tiagoposse/entauth"
+	"github.com/tiagoposse/authguard"
 )
 
 var (
-	tokenService    *entauth.TokenService
-	revocationStore *entauth.RevocationStore
+	tokenService    *authguard.TokenService
+	revocationStore *authguard.RevocationStore
 )
 
 func main() {
 	// 1. Create the revocation store and token service.
-	revocationStore = entauth.NewRevocationStore()
+	revocationStore = authguard.NewRevocationStore()
 
-	tokenService = entauth.NewTokenService("secret", 15*time.Minute, nil)
+	tokenService = authguard.NewTokenService("secret", 15*time.Minute, nil)
 	tokenService.SetRevocationStore(revocationStore)
 
 	mux := http.NewServeMux()
@@ -62,17 +62,17 @@ func authMiddleware(next http.Handler) http.Handler {
 
 // meHandler shows the authenticated user info (or 401 if token was revoked).
 func meHandler(w http.ResponseWriter, r *http.Request) {
-	userID, err := entauth.RequireAuth(r.Context())
+	userID, err := authguard.RequireAuth(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
-	deviceID, _ := entauth.GetDeviceID(r.Context())
+	deviceID, _ := authguard.GetDeviceID(r.Context())
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"user_id":  userID,
 		"device":   deviceID,
-		"roles":    entauth.GetRoles(r.Context()),
+		"roles":    authguard.GetRoles(r.Context()),
 	})
 }
 
@@ -90,7 +90,7 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sig := entauth.TokenSignature(rawToken)
+	sig := authguard.TokenSignature(rawToken)
 	revocationStore.RevokeToken(sig, claims.ExpiresAt)
 
 	fmt.Fprintln(w, "token revoked")
@@ -98,7 +98,7 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 
 // logoutAllHandler revokes all tokens for the authenticated user.
 func logoutAllHandler(w http.ResponseWriter, r *http.Request) {
-	userID, err := entauth.RequireAuth(r.Context())
+	userID, err := authguard.RequireAuth(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -110,7 +110,7 @@ func logoutAllHandler(w http.ResponseWriter, r *http.Request) {
 
 // logoutDeviceHandler revokes all tokens for a specific device.
 func logoutDeviceHandler(w http.ResponseWriter, r *http.Request) {
-	userID, err := entauth.RequireAuth(r.Context())
+	userID, err := authguard.RequireAuth(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return

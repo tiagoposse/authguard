@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/tiagoposse/entauth"
+	"github.com/tiagoposse/authguard"
 )
 
-var tokenService *entauth.TokenService
+var tokenService *authguard.TokenService
 
 func main() {
-	tokenService = entauth.NewTokenService("secret", 15*time.Minute, nil)
+	tokenService = authguard.NewTokenService("secret", 15*time.Minute, nil)
 	tokenService.SetScopeResolver(func(roles []string) []string {
 		m := map[string][]string{
 			"admin":  {"read", "write", "delete", "users:manage"},
@@ -35,33 +35,33 @@ func main() {
 	})
 
 	// Register custom guards.
-	entauth.RegisterGuard("isPremium", func(ctx context.Context, client interface{}) error {
-		tier, ok := entauth.GetSubscriptionTier(ctx)
+	authguard.RegisterGuard("isPremium", func(ctx context.Context, client interface{}) error {
+		tier, ok := authguard.GetSubscriptionTier(ctx)
 		if !ok || (tier != "pro" && tier != "enterprise") {
-			return entauth.Errorf(403, "premium subscription required")
+			return authguard.Errorf(403, "premium subscription required")
 		}
 		return nil
 	})
 
-	entauth.RegisterGuard("isOwner", func(ctx context.Context, client interface{}) error {
+	authguard.RegisterGuard("isOwner", func(ctx context.Context, client interface{}) error {
 		// In a real app, compare the authenticated user ID with the resource owner.
 		// Here we just check auth is present.
-		_, ok := entauth.GetUserID(ctx)
+		_, ok := authguard.GetUserID(ctx)
 		if !ok {
-			return entauth.ErrNotAuthenticated
+			return authguard.ErrNotAuthenticated
 		}
 		return nil
 	})
 
 	// Composed guards.
-	entauth.RegisterGuard("canManageUsers",
-		entauth.All("requiresAuth", "requiresRole:admin", "requiresScope:users:manage"),
+	authguard.RegisterGuard("canManageUsers",
+		authguard.All("requiresAuth", "requiresRole:admin", "requiresScope:users:manage"),
 	)
-	entauth.RegisterGuard("canEditOrAdmin",
-		entauth.Any("requiresRole:editor", "requiresRole:admin"),
+	authguard.RegisterGuard("canEditOrAdmin",
+		authguard.Any("requiresRole:editor", "requiresRole:admin"),
 	)
-	entauth.RegisterGuard("premiumOrAdmin",
-		entauth.Any("isPremium", "requiresRole:admin"),
+	authguard.RegisterGuard("premiumOrAdmin",
+		authguard.Any("isPremium", "requiresRole:admin"),
 	)
 
 	mux := http.NewServeMux()
@@ -74,9 +74,9 @@ func main() {
 	// Requires authentication
 	mux.HandleFunc("GET /dashboard", guarded("requiresAuth", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"user":   entauth.OptionalAuth(r.Context()),
-			"roles":  entauth.GetRoles(r.Context()),
-			"scopes": entauth.GetScopes(r.Context()),
+			"user":   authguard.OptionalAuth(r.Context()),
+			"roles":  authguard.GetRoles(r.Context()),
+			"scopes": authguard.GetScopes(r.Context()),
 		})
 	}))
 
@@ -106,10 +106,10 @@ func main() {
 
 // guarded wraps a handler with a named guard.
 func guarded(guardName string, handler http.HandlerFunc) http.HandlerFunc {
-	guard := entauth.Resolve(guardName)
+	guard := authguard.Resolve(guardName)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := guard(r.Context(), nil); err != nil {
-			if ge, ok := err.(*entauth.GuardError); ok {
+			if ge, ok := err.(*authguard.GuardError); ok {
 				http.Error(w, ge.Message, ge.Code)
 			} else {
 				http.Error(w, err.Error(), http.StatusForbidden)

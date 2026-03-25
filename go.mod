@@ -1,4 +1,4 @@
-module github.com/tiagoposse/entauth
+module github.com/tiagoposse/authguard
 
 go 1.25
 

@@ -12,13 +12,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/tiagoposse/entauth"
+	"github.com/tiagoposse/authguard"
 )
 
-var tokenService *entauth.TokenService
+var tokenService *authguard.TokenService
 
 func main() {
-	tokenService = entauth.NewTokenService("secret", 15*time.Minute, nil)
+	tokenService = authguard.NewTokenService("secret", 15*time.Minute, nil)
 	tokenService.SetScopeResolver(func(roles []string) []string {
 		return []string{"read", "write", "delete", "webhooks"}
 	})
@@ -106,21 +106,21 @@ func createAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
 
 // webhookHandler requires the "webhooks" scope.
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
-	if err := entauth.RequiresScope("webhooks")(r.Context(), nil); err != nil {
+	if err := authguard.RequiresScope("webhooks")(r.Context(), nil); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"webhooks": []string{"push", "pull_request", "release"},
-		"caller":   entauth.OptionalAuth(r.Context()),
-		"scopes":   entauth.GetScopes(r.Context()),
+		"caller":   authguard.OptionalAuth(r.Context()),
+		"scopes":   authguard.GetScopes(r.Context()),
 	})
 }
 
 // dataHandler requires the "read" scope.
 func dataHandler(w http.ResponseWriter, r *http.Request) {
-	if err := entauth.RequiresScope("read")(r.Context(), nil); err != nil {
+	if err := authguard.RequiresScope("read")(r.Context(), nil); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
