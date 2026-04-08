@@ -14,14 +14,28 @@ import (
 // and returns a context with the user ID, roles, permissions, device ID, and
 // token expiry set. If validation fails, returns the original context unchanged.
 func (t *TokenService) ValidateAndSetUser(ctx context.Context, authHeader string) context.Context {
+	ctx, _ = t.ValidateAndSetUserStrict(ctx, authHeader)
+	return ctx
+}
+
+// ValidateAndSetUserStrict validates a Bearer token from the Authorization header
+// and returns a context with claims set. Returns an error if the token is missing or invalid.
+// Use this when you want to enforce authentication and reject invalid tokens.
+func (t *TokenService) ValidateAndSetUserStrict(ctx context.Context, authHeader string) (context.Context, error) {
 	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-		return ctx
+		return ctx, fmt.Errorf("missing or malformed authorization header")
 	}
 	token := strings.TrimPrefix(authHeader, "Bearer ")
 	claims, err := t.ValidateTokenClaims(token)
 	if err != nil {
-		return ctx
+		return ctx, fmt.Errorf("invalid token: %w", err)
 	}
+	ctx = t.setClaimsInContext(ctx, claims)
+	return ctx, nil
+}
+
+// setClaimsInContext stores validated token claims into the context.
+func (t *TokenService) setClaimsInContext(ctx context.Context, claims *TokenClaims) context.Context {
 	ctx = SetUserID(ctx, claims.UserID)
 	ctx = SetRoles(ctx, claims.Roles)
 	ctx = SetTokenExpiry(ctx, claims.ExpiresAt)
@@ -39,6 +53,54 @@ func (t *TokenService) ValidateAndSetUser(ctx context.Context, authHeader string
 		}
 	}
 	return ctx
+}
+
+// AuthMode controls how the AuthMiddleware handles a request.
+type AuthMode int
+
+const (
+	// AuthRequired rejects requests without a valid token (401).
+	AuthRequired AuthMode = iota
+	// AuthOptional validates the token if present but allows unauthenticated requests.
+	AuthOptional
+	// AuthNone skips authentication entirely.
+	AuthNone
+)
+
+// AuthMiddleware returns an HTTP middleware that validates Bearer tokens.
+// The classify function determines the AuthMode for each request, letting the
+// consumer define which paths/operations are public, optional, or required.
+// If classify is nil, all requests require authentication.
+func (t *TokenService) AuthMiddleware(classify func(r *http.Request) AuthMode) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mode := AuthRequired
+			if classify != nil {
+				mode = classify(r)
+			}
+
+			if mode == AuthNone {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			authHeader := r.Header.Get("Authorization")
+			ctx, err := t.ValidateAndSetUserStrict(r.Context(), authHeader)
+			if err != nil {
+				if mode == AuthRequired {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					w.Write([]byte(`{"error":"authentication required"}`))
+					return
+				}
+				// AuthOptional: proceed without user context
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
 
 // ValidateAndSetAdmin validates an X-Admin-Token header and returns a context
