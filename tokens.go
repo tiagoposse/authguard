@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,63 +61,115 @@ func (t *TokenService) Expiration() time.Duration {
 	return t.expiration
 }
 
+// TokenKind says what a token may be used for. Each validator accepts
+// exactly one kind, so a refresh token can't authenticate a request and an
+// access token can't be exchanged for a new pair.
+type TokenKind string
+
+const (
+	KindAccess  TokenKind = "access"
+	KindRefresh TokenKind = "refresh"
+	KindAPIKey  TokenKind = "apikey"
+)
+
+// RefreshTokenTTL is how long a refresh token is valid.
+const RefreshTokenTTL = 7 * 24 * time.Hour
+
 // TokenClaims holds the parsed claims from a validated token.
 type TokenClaims struct {
 	UserID    uuid.UUID
 	Roles     []string
 	Scopes    []string // fine-grained access control; JWTs get full set, API keys get a subset
 	DeviceID  string
+	Kind      TokenKind
 	ExpiresAt time.Time
+	// IssuedAt is when this token was signed. Zero for tokens issued before
+	// the field existed.
+	IssuedAt time.Time
+	// AuthTime is when the user last authenticated (logged in), carried
+	// unchanged through refreshes so a caller can cap a session's total age.
+	// Zero for tokens issued before the field existed, and for API keys.
+	AuthTime time.Time
+}
+
+// TokenOptions are the optional inputs to token generation.
+type TokenOptions struct {
+	DeviceID string
+	// AuthTime is the original login time. Leave zero on login (it becomes
+	// now); on refresh, pass the AuthTime of the refresh token being used.
+	AuthTime time.Time
 }
 
 // GenerateTokens creates an access token and refresh token for the given user
 // with the specified roles encoded in the payload.
 func (t *TokenService) GenerateTokens(userID uuid.UUID, roles []string) (string, string, error) {
-	return t.GenerateTokensWithDevice(userID, roles, "")
+	return t.GenerateTokensWithOptions(userID, roles, TokenOptions{})
 }
 
 // GenerateTokensWithDevice creates tokens with an optional device/session identifier.
 func (t *TokenService) GenerateTokensWithDevice(userID uuid.UUID, roles []string, deviceID string) (string, string, error) {
-	now := time.Now()
+	return t.GenerateTokensWithOptions(userID, roles, TokenOptions{DeviceID: deviceID})
+}
 
-	// Resolve scopes from roles if resolver is configured
-	allRoles := roles
+// GenerateTokensWithOptions creates an access and a refresh token.
+func (t *TokenService) GenerateTokensWithOptions(userID uuid.UUID, roles []string, opts TokenOptions) (string, string, error) {
+	now := time.Now()
+	authTime := opts.AuthTime
+	if authTime.IsZero() {
+		authTime = now
+	}
+
+	allRoles := slices.Clone(roles)
 	if t.scopeResolver != nil {
-		scopes := t.scopeResolver(roles)
-		for _, s := range scopes {
+		for _, s := range t.scopeResolver(roles) {
 			allRoles = append(allRoles, "scope:"+s)
 		}
 	}
-
+	if err := checkPayloadFields(opts.DeviceID, allRoles); err != nil {
+		return "", "", err
+	}
 	rolesStr := strings.Join(allRoles, ",")
 
-	// Access token: userID|roles|expiry[|dev:deviceID]
-	expiry := now.Add(t.expiration).Unix()
-	payload := fmt.Sprintf("%s|%s|%d", userID.String(), rolesStr, expiry)
-	if deviceID != "" {
-		payload += "|dev:" + deviceID
+	// The kind marker sits at segment 3 so tokens from older versions, which
+	// put it (or the device ID) there too, still parse.
+	// Access:  userID|roles|expiry|iat:N|auth:N[|dev:deviceID]
+	// Refresh: userID|roles|expiry|refresh|iat:N|auth:N[|dev:deviceID]
+	tail := fmt.Sprintf("|iat:%d|auth:%d", now.Unix(), authTime.Unix())
+	if opts.DeviceID != "" {
+		tail += "|dev:" + opts.DeviceID
 	}
-	token := t.signToken(payload)
+	access := t.signToken(fmt.Sprintf("%s|%s|%d%s", userID, rolesStr, now.Add(t.expiration).Unix(), tail))
+	refresh := t.signToken(fmt.Sprintf("%s|%s|%d|refresh%s", userID, rolesStr, now.Add(RefreshTokenTTL).Unix(), tail))
+	return access, refresh, nil
+}
 
-	// Refresh token: userID|roles|expiry|refresh[|dev:deviceID] (longer lived)
-	refreshExpiry := now.Add(7 * 24 * time.Hour).Unix()
-	refreshPayload := fmt.Sprintf("%s|%s|%d|refresh", userID.String(), rolesStr, refreshExpiry)
-	if deviceID != "" {
-		refreshPayload += "|dev:" + deviceID
+// "|" separates payload segments and "," separates roles, so a value
+// containing either could forge a kind marker, an auth time or a scope.
+func checkPayloadFields(deviceID string, roles []string) error {
+	if strings.Contains(deviceID, "|") {
+		return fmt.Errorf("device ID must not contain %q", "|")
 	}
-	refreshToken := t.signToken(refreshPayload)
-
-	return token, refreshToken, nil
+	for _, r := range roles {
+		if strings.ContainsAny(r, "|,") {
+			return fmt.Errorf("role %q must not contain %q or %q", r, "|", ",")
+		}
+	}
+	return nil
 }
 
 // GenerateTokensForUser fetches roles via the RoleFetcher and then generates tokens.
 // If no RoleFetcher is configured, tokens are generated with empty roles.
 func (t *TokenService) GenerateTokensForUser(ctx context.Context, userID uuid.UUID) (string, string, error) {
-	return t.GenerateTokensForUserWithDevice(ctx, userID, "")
+	return t.GenerateTokensForUserWithOptions(ctx, userID, TokenOptions{})
 }
 
 // GenerateTokensForUserWithDevice fetches roles and generates tokens with a device ID.
 func (t *TokenService) GenerateTokensForUserWithDevice(ctx context.Context, userID uuid.UUID, deviceID string) (string, string, error) {
+	return t.GenerateTokensForUserWithOptions(ctx, userID, TokenOptions{DeviceID: deviceID})
+}
+
+// GenerateTokensForUserWithOptions fetches roles and generates tokens.
+func (t *TokenService) GenerateTokensForUserWithOptions(ctx context.Context, userID uuid.UUID, opts TokenOptions) (string, string, error) {
 	var roles []string
 	if t.roleFetcher != nil {
 		var err error
@@ -124,10 +178,10 @@ func (t *TokenService) GenerateTokensForUserWithDevice(ctx context.Context, user
 			return "", "", fmt.Errorf("fetching roles: %w", err)
 		}
 	}
-	return t.GenerateTokensWithDevice(userID, roles, deviceID)
+	return t.GenerateTokensWithOptions(userID, roles, opts)
 }
 
-// ValidateToken validates an access or refresh token and returns the user ID and roles.
+// ValidateToken validates an access token and returns the user ID and roles.
 // This is the backward-compatible signature; use ValidateTokenClaims for full claims.
 func (t *TokenService) ValidateToken(token string) (uuid.UUID, []string, error) {
 	claims, err := t.ValidateTokenClaims(token)
@@ -137,9 +191,46 @@ func (t *TokenService) ValidateToken(token string) (uuid.UUID, []string, error) 
 	return claims.UserID, claims.Roles, nil
 }
 
-// ValidateTokenClaims validates a token and returns full claims including permissions and device ID.
-// Also checks the revocation store if one is configured.
+// ValidateTokenClaims validates an access token and returns its claims.
+// Refresh tokens and API keys are rejected; use ValidateRefreshTokenClaims
+// or ValidateAPIKeyClaims for those.
 func (t *TokenService) ValidateTokenClaims(token string) (*TokenClaims, error) {
+	return t.validateKind(token, KindAccess)
+}
+
+// ValidateRefreshToken validates a refresh token and returns the user ID and roles.
+func (t *TokenService) ValidateRefreshToken(token string) (uuid.UUID, []string, error) {
+	claims, err := t.ValidateRefreshTokenClaims(token)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	return claims.UserID, claims.Roles, nil
+}
+
+// ValidateRefreshTokenClaims validates a refresh token and returns its claims.
+func (t *TokenService) ValidateRefreshTokenClaims(token string) (*TokenClaims, error) {
+	return t.validateKind(token, KindRefresh)
+}
+
+// ValidateAPIKeyClaims validates an API key and returns its claims.
+func (t *TokenService) ValidateAPIKeyClaims(token string) (*TokenClaims, error) {
+	return t.validateKind(token, KindAPIKey)
+}
+
+func (t *TokenService) validateKind(token string, want TokenKind) (*TokenClaims, error) {
+	claims, err := t.parseToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if claims.Kind != want {
+		return nil, fmt.Errorf("expected %s token, got %s", want, claims.Kind)
+	}
+	return claims, nil
+}
+
+// parseToken verifies the signature, expiry and revocation of any kind of
+// token. Callers must check Kind.
+func (t *TokenService) parseToken(token string) (*TokenClaims, error) {
 	parts := splitToken(token)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid token format")
@@ -151,7 +242,6 @@ func (t *TokenService) ValidateTokenClaims(token string) (*TokenClaims, error) {
 	}
 	payload := string(payloadBytes)
 
-	// Verify signature
 	mac := hmac.New(sha256.New, []byte(t.secret))
 	mac.Write([]byte(payload))
 	expectedSig := hex.EncodeToString(mac.Sum(nil))
@@ -159,7 +249,6 @@ func (t *TokenService) ValidateTokenClaims(token string) (*TokenClaims, error) {
 		return nil, fmt.Errorf("invalid token signature")
 	}
 
-	// Parse payload: split by "|"
 	segments := strings.Split(payload, "|")
 	if len(segments) < 2 {
 		return nil, fmt.Errorf("invalid token payload")
@@ -169,7 +258,6 @@ func (t *TokenService) ValidateTokenClaims(token string) (*TokenClaims, error) {
 
 	var allEntries []string
 	var expiry int64
-	var deviceID string
 
 	if len(segments) >= 3 {
 		// Try new format: segments[1] is roles, segments[2] is expiry
@@ -187,10 +275,23 @@ func (t *TokenService) ValidateTokenClaims(token string) (*TokenClaims, error) {
 		fmt.Sscanf(segments[1], "%d", &expiry)
 	}
 
-	// Scan remaining segments for device ID and "refresh" marker
+	claims := &TokenClaims{Kind: KindAccess}
 	for i := 3; i < len(segments); i++ {
-		if strings.HasPrefix(segments[i], "dev:") {
-			deviceID = strings.TrimPrefix(segments[i], "dev:")
+		seg := segments[i]
+		switch {
+		case i == 3 && seg == string(KindRefresh):
+			claims.Kind = KindRefresh
+		case i == 3 && seg == string(KindAPIKey):
+			claims.Kind = KindAPIKey
+		case strings.HasPrefix(seg, "dev:"):
+			claims.DeviceID = strings.TrimPrefix(seg, "dev:")
+		case strings.HasPrefix(seg, "iat:"):
+			claims.IssuedAt, err = parseUnix(strings.TrimPrefix(seg, "iat:"))
+		case strings.HasPrefix(seg, "auth:"):
+			claims.AuthTime, err = parseUnix(strings.TrimPrefix(seg, "auth:"))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("invalid token payload")
 		}
 	}
 
@@ -202,34 +303,23 @@ func (t *TokenService) ValidateTokenClaims(token string) (*TokenClaims, error) {
 		return nil, fmt.Errorf("token expired")
 	}
 
-	userID, err := uuid.Parse(userIDStr)
+	claims.UserID, err = uuid.Parse(userIDStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid user ID in token")
 	}
+	claims.ExpiresAt = time.Unix(expiry, 0)
 
-	// Separate roles and scopes (scope: prefix)
-	var roles []string
-	var scopes []string
 	for _, entry := range allEntries {
 		if strings.HasPrefix(entry, "scope:") {
-			scopes = append(scopes, strings.TrimPrefix(entry, "scope:"))
+			claims.Scopes = append(claims.Scopes, strings.TrimPrefix(entry, "scope:"))
 		} else if strings.HasPrefix(entry, "perm:") {
 			// Backward compat: treat old perm: entries as scopes
-			scopes = append(scopes, strings.TrimPrefix(entry, "perm:"))
+			claims.Scopes = append(claims.Scopes, strings.TrimPrefix(entry, "perm:"))
 		} else {
-			roles = append(roles, entry)
+			claims.Roles = append(claims.Roles, entry)
 		}
 	}
 
-	claims := &TokenClaims{
-		UserID:    userID,
-		Roles:     roles,
-		Scopes:    scopes,
-		DeviceID:  deviceID,
-		ExpiresAt: time.Unix(expiry, 0),
-	}
-
-	// Check revocation store
 	if t.revocationStore != nil {
 		sig := TokenSignature(token)
 		if sig != "" && t.revocationStore.IsRevoked(claims, sig) {
@@ -240,9 +330,12 @@ func (t *TokenService) ValidateTokenClaims(token string) (*TokenClaims, error) {
 	return claims, nil
 }
 
-// ValidateRefreshToken validates a refresh token and returns the user ID and roles.
-func (t *TokenService) ValidateRefreshToken(token string) (uuid.UUID, []string, error) {
-	return t.ValidateToken(token)
+func parseUnix(s string) (time.Time, error) {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(n, 0), nil
 }
 
 // GenerateAdminToken creates a short-lived admin elevation token (1 hour).

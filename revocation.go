@@ -36,9 +36,7 @@ func (rs *RevocationStore) RevokeToken(tokenSignature string, expiresAt time.Tim
 	rs.tokens[tokenSignature] = expiresAt
 }
 
-// RevokeAllForUser invalidates all tokens issued before now for the given user.
-// Any token whose issue time (expiry minus TTL) is before the revocation timestamp
-// will be rejected. Use this for "log out everywhere" or "password changed".
+// RevokeAllForUser invalidates all tokens issued before now for the given user. Use this for "log out everywhere" or "password changed".
 func (rs *RevocationStore) RevokeAllForUser(userID uuid.UUID) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -66,28 +64,36 @@ func (rs *RevocationStore) IsRevoked(claims *TokenClaims, tokenSignature string)
 		return true
 	}
 
-	// Check user-wide revocation: token is revoked if it was issued before the revocation time.
-	// We approximate issue time as ExpiresAt minus the token's TTL window.
-	if revokedAt, ok := rs.users[claims.UserID]; ok {
-		if claims.ExpiresAt.Before(revokedAt.Add(24 * time.Hour)) {
-			// Token expires within 24h of revocation — it was likely issued before revocation.
-			// This is conservative: we reject tokens that might have been issued around
-			// the revocation time. For exact issue-time tracking, tokens would need an iat claim.
+	// User and device revocation end sessions. An API key is a separate
+	// credential that outlives the 7d these entries are kept, so applying it
+	// would only block the key for a week. Revoke a key with RevokeToken.
+	if claims.Kind == KindAPIKey {
+		return false
+	}
+
+	if revokedAt, ok := rs.users[claims.UserID]; ok && issuedBefore(claims, revokedAt) {
+		return true
+	}
+
+	if claims.DeviceID != "" {
+		key := claims.UserID.String() + ":" + claims.DeviceID
+		if revokedAt, ok := rs.devices[key]; ok && issuedBefore(claims, revokedAt) {
 			return true
 		}
 	}
 
-	// Check device-specific revocation
-	if claims.DeviceID != "" {
-		key := claims.UserID.String() + ":" + claims.DeviceID
-		if revokedAt, ok := rs.devices[key]; ok {
-			if claims.ExpiresAt.Before(revokedAt.Add(24 * time.Hour)) {
-				return true
-			}
-		}
-	}
-
 	return false
+}
+
+// issuedBefore reports whether the token was issued at or before revokedAt.
+// IssuedAt has second granularity, so a token signed in the same second as
+// the revocation counts as revoked. Tokens from before IssuedAt existed fall
+// back to the old guess: anything expiring within 24h of the revocation.
+func issuedBefore(claims *TokenClaims, revokedAt time.Time) bool {
+	if !claims.IssuedAt.IsZero() {
+		return !claims.IssuedAt.After(revokedAt.Truncate(time.Second))
+	}
+	return claims.ExpiresAt.Before(revokedAt.Add(24 * time.Hour))
 }
 
 // cleanupLoop removes expired entries every 60 seconds.
@@ -111,10 +117,9 @@ func (rs *RevocationStore) cleanup() {
 		}
 	}
 
-	// Remove user-wide revocations older than 24 hours (max token lifetime is 7 days for refresh,
-	// but we keep revocations for 24h which covers access tokens; refresh tokens should be
-	// re-validated against the DB anyway)
-	cutoff := now.Add(-24 * time.Hour)
+	// Kept as long as a refresh token issued just before the revocation stays
+	// valid; dropping it sooner would let that token work again.
+	cutoff := now.Add(-RefreshTokenTTL)
 	for uid, revokedAt := range rs.users {
 		if revokedAt.Before(cutoff) {
 			delete(rs.users, uid)

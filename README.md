@@ -85,12 +85,16 @@ func main() {
 
 | Type | TTL | Format | Use Case |
 |------|-----|--------|----------|
-| Access Token | Configurable | `userID\|roles,scopes\|expiry` | Short-lived request auth |
-| Refresh Token | 7 days | `userID\|roles,scopes\|expiry\|refresh` | Token renewal |
+| Access Token | Configurable | `userID\|roles,scopes\|expiry\|iat:N\|auth:N[\|dev:id]` | Short-lived request auth |
+| Refresh Token | 7 days | `userID\|roles,scopes\|expiry\|refresh\|iat:N\|auth:N[\|dev:id]` | Token renewal |
 | Admin Token | 1 hour | `admin\|userID\|expiry` | Temporary elevated access |
-| API Key | Custom | `userID\|roles,scopes\|expiry\|apikey` | Service-to-service auth |
+| API Key | Custom | `userID\|roles,scopes\|expiry\|apikey\|iat:N` | Service-to-service auth |
 
 All tokens are hex-encoded payloads with an HMAC-SHA256 signature: `hexPayload.signature`.
+
+Each validator accepts one kind of token only. `ValidateTokenClaims` (and the bearer middleware) rejects refresh tokens and API keys, `ValidateRefreshTokenClaims` rejects everything but refresh tokens, and `ValidateAPIKey` rejects everything but API keys. `iat` is when the token was signed and `auth` is when the user logged in; tokens from older versions without them still parse, with zero times.
+
+Roles, scopes and device IDs can't contain `|`, and roles and scopes can't contain `,`. Generation returns an error instead of signing a token whose fields would be misread.
 
 ### Generating Tokens
 
@@ -100,6 +104,12 @@ access, refresh, err := ts.GenerateTokens(userID, []string{"editor"})
 
 // With device tracking
 access, refresh, err := ts.GenerateTokensWithDevice(userID, roles, "mobile-1")
+
+// On refresh, keep the original login time so you can cap a session's total age
+access, refresh, err := ts.GenerateTokensWithOptions(userID, roles, authguard.TokenOptions{
+    DeviceID: claims.DeviceID,
+    AuthTime: claims.AuthTime,
+})
 
 // Using RoleFetcher to resolve roles from DB
 access, refresh, err := ts.GenerateTokensForUser(ctx, userID)
@@ -117,12 +127,17 @@ apiKey, err := ts.GenerateAPIKey(userID, []string{"bot"}, []string{"read"}, 365*
 // Basic validation — returns userID and roles
 userID, roles, err := ts.ValidateToken(token)
 
-// Full claims
+// Full claims (access tokens only)
 claims, err := ts.ValidateTokenClaims(token)
-// claims.UserID, claims.Roles, claims.Scopes, claims.DeviceID, claims.ExpiresAt
+// claims.UserID, claims.Roles, claims.Scopes, claims.DeviceID, claims.Kind,
+// claims.ExpiresAt, claims.IssuedAt, claims.AuthTime
 
-// Refresh token validation
+// Refresh token validation (refresh tokens only)
 userID, roles, err := ts.ValidateRefreshToken(token)
+claims, err := ts.ValidateRefreshTokenClaims(token)
+
+// API key validation (API keys only)
+claims, err := ts.ValidateAPIKeyClaims(token)
 
 // Admin token validation
 userID, err := ts.ValidateAdminToken(token)
@@ -163,7 +178,7 @@ Automatically refreshes tokens nearing expiration:
 
 ```go
 handler := ts.RefreshMiddleware(5 * time.Minute)(yourHandler)
-// Sets X-New-Access-Token and X-New-Refresh-Token headers when refreshed
+// Sets the X-Refreshed-Token header to a new access token when refreshed
 ```
 
 ## Guards

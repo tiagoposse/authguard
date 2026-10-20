@@ -26,10 +26,27 @@ All tokens: `<hexPayload>.<hmac-sha256-signature>`
 
 | Token | TTL | Payload Format | Generator |
 |-------|-----|----------------|-----------|
-| **Access** | Configurable | `userID\|roles,scopes\|expiry[\|dev:deviceID]` | `GenerateTokens()` |
-| **Refresh** | 7 days (hardcoded) | `userID\|roles,scopes\|expiry\|refresh[\|dev:deviceID]` | `GenerateTokens()` |
+| **Access** | Configurable | `userID\|roles,scopes\|expiry\|iat:N\|auth:N[\|dev:deviceID]` | `GenerateTokens()` |
+| **Refresh** | 7 days (`RefreshTokenTTL`) | `userID\|roles,scopes\|expiry\|refresh\|iat:N\|auth:N[\|dev:deviceID]` | `GenerateTokens()` |
 | **Admin Elevation** | 1 hour (hardcoded) | `admin\|userID\|expiry` | `GenerateAdminToken()` |
-| **API Key** | Custom | `userID\|roles,scope:s1,scope:s2\|expiry\|apikey` | `GenerateAPIKey()` |
+| **API Key** | Custom | `userID\|roles,scope:s1,scope:s2\|expiry\|apikey\|iat:N` | `GenerateAPIKey()` |
+
+- The kind marker (`refresh`/`apikey`) has to stay at segment 3: tokens from
+  before `iat`/`auth` existed put it there, and `parseToken` only reads it
+  there, so a `dev:` value can never be mistaken for one.
+- Each validator accepts exactly one `TokenKind`. Until this was added, a
+  refresh token or API key worked as a bearer token and any token worked as a
+  refresh token. Don't add a validator that skips the kind check.
+- `iat`/`auth` are optional on parse (zero for old tokens). Revocation uses
+  `IssuedAt` when present and falls back to the old "expires within 24h of
+  the revocation" guess otherwise.
+- User and device revocations are kept for `RefreshTokenTTL`. Dropping them
+  sooner (it used to be 24h) makes revoked refresh tokens valid again.
+- API keys skip user and device revocation and are only revoked by
+  signature (`RevokeToken`). Once keys carried `iat`, "log out everywhere"
+  started blocking every key for 7d, after which they worked again.
+- Generation rejects `|` in device IDs and roles/scopes, and `,` in
+  roles/scopes, since either would let a value forge a segment.
 
 ## Key Types & Functions
 
@@ -43,11 +60,15 @@ ts.SetRevocationStore(store)   // attach revocation tracking
 access, refresh, err := ts.GenerateTokens(userID, roles)
 access, refresh, err := ts.GenerateTokensWithDevice(userID, roles, deviceID)
 access, refresh, err := ts.GenerateTokensForUser(ctx, userID)  // uses roleFetcher
+access, refresh, err := ts.GenerateTokensWithOptions(userID, roles, TokenOptions{DeviceID: d, AuthTime: t})
+access, refresh, err := ts.GenerateTokensForUserWithOptions(ctx, userID, opts)
 adminToken, expiresAt := ts.GenerateAdminToken(userID)
 apiKey, err := ts.GenerateAPIKey(userID, roles, scopes, expiry)
 
 // Validate
-claims, err := ts.ValidateTokenClaims(token)  // -> *TokenClaims
+claims, err := ts.ValidateTokenClaims(token)         // access tokens only
+claims, err := ts.ValidateRefreshTokenClaims(token)  // refresh tokens only
+claims, err := ts.ValidateAPIKeyClaims(token)        // API keys only
 userID, roles, err := ts.ValidateToken(token)
 userID, roles, err := ts.ValidateRefreshToken(token)
 userID, err := ts.ValidateAdminToken(token)
@@ -60,7 +81,10 @@ type TokenClaims struct {
     Roles     []string   // includes "sub:tier" entries
     Scopes    []string   // parsed from "scope:X" entries
     DeviceID  string
+    Kind      TokenKind  // KindAccess, KindRefresh or KindAPIKey
     ExpiresAt time.Time
+    IssuedAt  time.Time  // zero for old tokens
+    AuthTime  time.Time  // original login, kept across refreshes; zero for old tokens and API keys
 }
 ```
 

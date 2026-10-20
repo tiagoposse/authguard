@@ -129,7 +129,7 @@ func (t *TokenService) RefreshMiddleware(threshold time.Duration) func(http.Hand
 				claims, err := t.ValidateTokenClaims(token)
 				if err == nil && time.Until(claims.ExpiresAt) < threshold {
 					// Token is near expiry — generate a fresh one
-					newToken, _, genErr := t.GenerateTokensWithDevice(claims.UserID, claims.Roles, claims.DeviceID)
+					newToken, _, genErr := t.GenerateTokensWithOptions(claims.UserID, claims.Roles, TokenOptions{DeviceID: claims.DeviceID, AuthTime: claims.AuthTime})
 					if genErr == nil {
 						w.Header().Set("X-Refreshed-Token", newToken)
 					}
@@ -148,7 +148,7 @@ func (t *TokenService) ValidateAPIKey(ctx context.Context, apiKey string) contex
 	if apiKey == "" {
 		return ctx
 	}
-	claims, err := t.ValidateTokenClaims(apiKey)
+	claims, err := t.ValidateAPIKeyClaims(apiKey)
 	if err != nil {
 		return ctx
 	}
@@ -172,9 +172,12 @@ func (t *TokenService) GenerateAPIKey(userID uuid.UUID, roles []string, scopes [
 	for _, s := range scopes {
 		allEntries = append(allEntries, "scope:"+s)
 	}
+	if err := checkPayloadFields("", allEntries); err != nil {
+		return "", err
+	}
 	rolesStr := strings.Join(allEntries, ",")
 
-	expiryUnix := time.Now().Add(expiry).Unix()
-	payload := fmt.Sprintf("%s|%s|%d|apikey", userID.String(), rolesStr, expiryUnix)
+	now := time.Now()
+	payload := fmt.Sprintf("%s|%s|%d|apikey|iat:%d", userID.String(), rolesStr, now.Add(expiry).Unix(), now.Unix())
 	return t.signToken(payload), nil
 }
